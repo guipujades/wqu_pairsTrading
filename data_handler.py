@@ -35,24 +35,29 @@ class Tickers_B3():
         """
         return str(item) + '11'
 
-    def open_file(self):
+    def open_file(self, local_doc=True):
         """
         Downloads a zip file from B3 containing sector information and extracts it.
         """
-        url = 'https://bvmf.bmfbovespa.com.br/InstDados/InformacoesEmpresas/ClassifSetorial.zip'
-        req = requests.get(url)
         
-        # Split for file name
-        filename = url.split('/')[-1]
-        
-        # Temp file
-        with open(self.tmp_path + '/' + filename,'wb') as output_file:
-            output_file.write(req.content)
-        
-        with zipfile.ZipFile(self.tmp_path + '/' + filename,'r') as zip_ref:
-            zip_ref.extractall(self.tmp_path)
+        if local_doc:
+            pass
+            
+        else: 
+            url = 'https://bvmf.bmfbovespa.com.br/InstDados/InformacoesEmpresas/ClassifSetorial.zip'
+            req = requests.get(url)
+            
+            # Split for file name
+            filename = url.split('/')[-1]
+            
+            # Temp file
+            with open(self.tmp_path + '/' + filename,'wb') as output_file:
+                output_file.write(req.content)
+            
+            with zipfile.ZipFile(self.tmp_path + '/' + filename,'r') as zip_ref:
+                zip_ref.extractall(self.tmp_path)
 
-    def get_tickers(self, yfinance=True):
+    def get_tickers(self, yfinance=True, local_doc=True):
         """
         Opens the downloaded xlsx file from B3, organizes data,
         saves the dataframe, and returns a list of tickers.
@@ -61,7 +66,13 @@ class Tickers_B3():
         :return: A tuple containing a list of filtered stocks, the dataframe of read data, 
         and the dataframe from B3.
         """
-        file = glob(self.tmp_path + '/' + 'Setorial*.xlsx')[0]
+        
+        if local_doc:
+            home = Path.home()
+            file = Path(home, 'Documents', 'GitHub', 'database', 'setorial_b3.xlsx')
+        else:
+            file = glob(self.tmp_path + '/' + 'Setorial*.xlsx')[0]
+        
         df_b3 = pd.read_excel(file)
         df_b3 = (df_b3.ffill().dropna(axis=0))
         
