@@ -138,21 +138,19 @@ for i in range(kmeans.n_clusters):
 
 # Operations
 operations = []
-
-# Select stocks for long and short within each cluster
+closest_assets = []
+farthest_assets = []
 for cluster in range(kmeans.n_clusters):
     cluster_indices = np.where(kmeans_labels == cluster)[0]
-    
-    if len(cluster_indices) > 1:  
-        
+    if len(cluster_indices) > 1:
         closest_index = cluster_indices[np.argmin(distances_to_centroids[cluster_indices, cluster])]
         farthest_index = cluster_indices[np.argmax(distances_to_centroids[cluster_indices, cluster])]
-
         closest = residuals.columns[closest_index]
         farthest = residuals.columns[farthest_index]
-
         if closest != farthest:
             operations.append((closest, farthest))
+            closest_assets.append((closest, cluster))
+            farthest_assets.append((farthest, cluster))
 
 for closest, farthest in operations:
     print(f'Long {closest}, Short {farthest}')
@@ -160,11 +158,33 @@ for closest, farthest in operations:
 # Plot PCA result with K-Means labels
 plt.figure(figsize=(12, 8))
 sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], hue=kmeans_labels, palette='tab10')
-plt.scatter(kmeans.cluster_centers_[:, 0], kmeans.cluster_centers_[:, 1], s=300, c='red', label='Centroids', marker='X')
+# plt.scatter(kmeans.cluster_centers_[:, 0], kmeans.cluster_centers_[:, 1], s=300, c='red', label='Centroids', marker='X')
 plt.title('Clusters K-Means (PCA Reduced Data)')
 plt.xlabel('PCA Component 1')
 plt.ylabel('PCA Component 2')
 plt.legend(title='Cluster')
+plt.show()
+
+# Add labels
+plt.figure(figsize=(12, 8))
+sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], hue=kmeans_labels, palette='tab10')
+# plt.scatter(kmeans.cluster_centers_[:, 0], kmeans.cluster_centers_[:, 1], s=300, c='red', label='Centroids', marker='X')
+plt.title('Clusters K-Means (PCA Reduced Data)')
+plt.xlabel('PCA Component 1')
+plt.ylabel('PCA Component 2')
+plt.legend(title='Cluster')
+
+# Add labels for closest and farthest assets
+for label, cluster in closest_assets:
+    idx = residuals.columns.get_loc(label)
+    plt.annotate(label, (pca_result[idx, 0], pca_result[idx, 1]), fontsize=14, alpha=1, color='black', 
+                 xytext=(5,5), textcoords='offset points')
+
+for label, cluster in farthest_assets:
+    idx = residuals.columns.get_loc(label)
+    plt.annotate(label, (pca_result[idx, 0], pca_result[idx, 1]), fontsize=14, alpha=1, color='black', 
+                 xytext=(5,5), textcoords='offset points')
+
 plt.show()
 
 # Simple backtest
@@ -209,9 +229,9 @@ for strategy in strategies_cumulative_returns.columns:
     plt.plot(strategies_cumulative_returns[strategy], label=strategy, linestyle='--')
 
 plt.plot(ibov_cumulative_returns.index, ibov_cumulative_returns, label='IBOV', linewidth=2)
-plt.title('Retornos Acumulados: Estratégias Long-Short vs IBOV')
-plt.xlabel('Data')
-plt.ylabel('Retorno Acumulado')
+plt.title('Long-Short vs IBOV')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Return')
 plt.legend()
 plt.grid(True)
 plt.show()
