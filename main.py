@@ -2,17 +2,12 @@ import tempfile
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from tqdm import tqdm 
-import statsmodels.api as sm
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import silhouette_score
-from datetime import timedelta
+import datetime as dt
 
 from data_handler import *
 from data_utils import *
+from strategies import * 
+from backtesting import *
 
 # Get data
 tmp_path = tempfile.mkdtemp()
@@ -49,7 +44,8 @@ df = pd.merge(df, ibov['ibov_returns'], on='Date')
 
 # Test period (only one run): pre-backtesting
 df_all_data = df.copy()
-test_period = pd.to_datetime('2010-03-01')
+test_period = pd.to_datetime('2019-12-01')
+end_bt = '2019-12-31' # '2014-02-01'
 df = df[df.index <= test_period]
 
 # Liquidity filter
@@ -59,181 +55,156 @@ liquidity_filter = pd.DataFrame({'Vol_filter': df[df.Ticker==stock_reference]['F
 # Apply liquidity: this is just to avoid stocks with no liquidity at all
 df['rolling_mean'] = df.groupby('Ticker')['Financial_Volume'].transform(lambda x: x.rolling(window=21).mean())
 df = pd.merge(df.reset_index(), liquidity_filter, on=['Date'], how='inner')
-liquidity_mask = df['rolling_mean'] < df['Vol_filter'] * 0.01 # careful not to change df size
+liquidity_mask = df['rolling_mean'] < df['Vol_filter'] * 0.15 # careful not to change df size
 date_backup = df['Date'].copy()
 ticker_backup = df['Ticker'].copy()
 
 df.loc[liquidity_mask, :] = np.nan
 df['Date'] = date_backup
 df['Ticker'] = ticker_backup
-df.set_index('Date', inplace=True)
 
-assets = df['Ticker'].unique()
-residuals = pd.DataFrame(index=df.index.unique())
-for ticker in tqdm(assets):
+# benchmark strategy
+long_dict, short_dict = bench_ll(df)
+
+# main strategy
+
+
+# backtesting 
+print('Running backtest...')
+fee = 0.005 * 0.10
+equity = 100_000
+round_control = 0
+cdi_efficiency = 0.9
+log_operations = []
+buy_control, short_control, pos_control, bt_control = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+cash_flow, cash_flow_control = pd.DataFrame(), pd.DataFrame()
+positions = False
+
+# CDI
+codigo_bcb = 11
+bacen_api = 'http://api.bcb.gov.br/dados/serie/bcdata.sgs.{}/dados?formato=json'.format(codigo_bcb)
+selic = pd.read_json(bacen_api)
+selic['data'] = pd.to_datetime(selic[ 'data'], dayfirst = True)
+selic = selic.rename(columns={'data': 'Data', 'valor': 'Selic'})
+selic = selic.set_index('Data')
+selic = selic['Selic'] / 100
+
+for date, _ in long_dict.items():
     
-    df_ = df[df['Ticker'] == ticker]
-    df_ = df_[['return', 'ibov_returns']].dropna() 
-    if len(df_) == 0:
+    print(f'Equity {equity} in {date}')
+    
+    date_ = find_last_day_of_month(date, ibov.index)
+    date_bt = date_ + pd.offsets.MonthBegin(1)    
+    
+    if positions:
+        
+        # Valorizacao da posicao em caixa
+        cdi_date_in = cash_flow_control.loc[round_control-1, 'data']
+        cdi_date_out = date_
+        cash = cash_flow_control.loc[round_control-1, 'cash']
+        
+        handle_cdi = selic.copy()
+        handle_cdi = handle_cdi[(handle_cdi.index>=cdi_date_in) & (handle_cdi.index<=cdi_date_out)]
+        cum_cdi = handle_cdi.add(1).cumprod()-1
+        cash_applied_cdi = cash + (cash * (cum_cdi.iloc[-1] * cdi_efficiency))
+        cash_flow_control.loc[round_control-1, 'cash'] = cash_applied_cdi
+        
+        if len(buy_control) == 0 or len(short_control) == 0:
+            print('Error: prob empty df...')
+            break
+        
+        handle_positions, equity = handling_positions(pos_control, cash_flow_control, prices_enfoque, date_, fee, round_control, cum_cdi)
+        bt_control = pd.concat([bt_control, handle_positions], axis=0)
+        log_operations.append(handle_positions)
+    
+    if equity < 5000:
+        print(f'Equity too low in {date}')
+        break
+    
+    buy_port = pd.DataFrame({'assets': long_dict[date]})
+    short_port = pd.DataFrame({'assets': short_dict[date]})
+    if len(buy_port) == 0:
         continue
     
-    # Deal with nans (liquidity filter)
-    min_non_na = int(0.9 * len(df_))
-    df_.dropna(thresh=min_non_na, axis=1, inplace=True)
+    buy_control, total_equity_usage_buy, cash_buy = make_positions(buy_port, prices_enfoque, equity, date_bt, fee, round_control, buy=True, atr_values=None)
+    short_control, total_equity_usage_short, cash_short = make_positions(short_port, prices_enfoque, equity, date_bt, fee, round_control, buy=False, atr_values=None)
     
-    # Get residuals
-    X = sm.add_constant(df_['ibov_returns'])
-    y = df_['return']
-    model = sm.OLS(y, X).fit()
-    resid = model.resid
-    residuals[ticker] = resid
+    pos_control = pd.concat([buy_control, short_control])
+    cash_flow_control = handle_cash_flow(cash_flow, date_, equity, total_equity_usage_buy, total_equity_usage_short, cash_buy, cash_short, round_control)
+    
+    round_control+=1
+    positions = True
+    
+    # Desmontar operacoes finais
+    if date == list(long_dict.keys())[-1]:
+        handle_positions, equity = handling_positions(pos_control, cash_flow_control, prices_enfoque, date_, fee, round_control, cum_cdi)
+        
+        cash_flow_control.loc[round_control, 'initial_equity'] = equity
+        cash_flow_control.loc[round_control, 'data'] = end_bt
+        
+        bt_control = pd.concat([bt_control, handle_positions], axis=0)
+        log_operations.append(handle_positions)
 
-# Deal with nans
-min_non_na = int(0.9 * len(residuals))
-residuals.dropna(thresh=min_non_na, axis=1, inplace=True)
-residuals = residuals.ffill().bfill()
 
-# PCA
-pca = PCA(n_components=2)
-pca_result = pca.fit_transform(residuals.T)
 
-# Optimal number of cluster
-inertia = []
-silhouette_scores = []
-K = range(2, 11)  # test between 2 to 10 clusters
-for k in K:
-    kmeans = KMeans(n_clusters=k, random_state=42)
-    kmeans.fit(pca_result)
-    inertia.append(kmeans.inertia_)
-    score = silhouette_score(pca_result, kmeans.labels_)
-    silhouette_scores.append(score)
+bt_period_choice = 12
+operations_log = pd.concat(log_operations, axis=0)
+# operations_log.to_excel(Path(Path.home(), 'Desktop', 'log_op_ll.xlsx'))
+# cash_flow.to_excel(Path(Path.home(), 'Desktop', 'cash_flow_ll.xlsx'))
 
-# OPtimal number results
-plt.figure(figsize=(16, 8))
+# Taxas pagas
+total_comission = np.sum(operations_log.comission)
+print(f'Taxas pagas: {total_comission}')
 
-plt.subplot(1, 2, 1)
-plt.plot(K, inertia, 'bo-')
-plt.xlabel('Number of clusters (k)')
-plt.ylabel('Inertia')
-plt.title('Elbow Method For Optimal k')
+# Resultados
+bt_result = cash_flow_control[['data', 'initial_equity']]
+bt_result.set_index('data', inplace=True)
+bt_result.index.name = 'Date'
+bt_result.index = pd.to_datetime(bt_result.index)
+bt_result = bt_result.iloc[:-1,:]
 
-plt.subplot(1, 2, 2)
-plt.plot(K, silhouette_scores, 'bo-')
-plt.xlabel('Number of clusters (k)')
-plt.ylabel('Silhouette Score')
-plt.title('Silhouette Scores For Optimal k')
+# Merge estrategia e ibov
+btest = pd.merge_asof(bt_result, ibov['Adj Close'], on='Date', direction='backward')
+btest = btest.rename(columns={'Adj Close': 'ibov', 'initial_equity':'final_return'})
+btest.set_index('Date', inplace=True)
+btest = btest.pct_change()
+btest.dropna(inplace=True)
 
-plt.tight_layout()
-plt.show()
+# Metricas
+bt_result = metrics(btest, rf=0, period_param=bt_period_choice)
+results_t = pd.DataFrame.from_dict(bt_result, orient='index', columns=['Métricas'])
+print(results_t)
+# results.to_excel(Path(Path.home(), 'Desktop', 'results.xlsx'))
 
-# Best number of cluster
-optimal_k = K[np.argmax(silhouette_scores)]
-kmeans = KMeans(n_clusters=optimal_k, random_state=42)
-kmeans_labels = kmeans.fit_predict(pca_result)
+# Ibov metrics
+vol_ibov = btest.ibov.std() * np.sqrt(bt_period_choice)
+n = len(btest.ibov)/bt_period_choice
+total_return = btest.ibov.add(1).cumprod()
+cagr_ibov = total_return.iloc[-1]**(1/n) - 1
+sharpe_ibov = cagr_ibov / vol_ibov
 
-# Distances to centroids for each cluster
-distances_to_centroids = np.zeros((pca_result.shape[0], kmeans.n_clusters))
-for i in range(kmeans.n_clusters):
-    distances_to_centroids[:, i] = np.linalg.norm(pca_result - kmeans.cluster_centers_[i], axis=1)
+# Backtest stats
+def add0(df):
+    df.loc[-1] = 0
+    df.index = df.index + 1
+    df = df.sort_index()
+    return df
 
-# Operations
-operations = []
-closest_assets = []
-farthest_assets = []
-for cluster in range(kmeans.n_clusters):
-    cluster_indices = np.where(kmeans_labels == cluster)[0]
-    if len(cluster_indices) > 1:
-        closest_index = cluster_indices[np.argmin(distances_to_centroids[cluster_indices, cluster])]
-        farthest_index = cluster_indices[np.argmax(distances_to_centroids[cluster_indices, cluster])]
-        closest = residuals.columns[closest_index]
-        farthest = residuals.columns[farthest_index]
-        if closest != farthest:
-            operations.append((closest, farthest))
-            closest_assets.append((closest, cluster))
-            farthest_assets.append((farthest, cluster))
+# insert the new row at the beginning of the datafra
+btest = add0(btest.reset_index())
+# btest.Data.iloc[0] = btest.Data.iloc[1] - dt.timedelta(days=1)
+btest.loc[btest.index[0], 'Date'] = btest.loc[btest.index[1], 'Date'] - dt.timedelta(days=1)
+btest.set_index('Date', inplace=True)
 
-for closest, farthest in operations:
-    print(f'Long {closest}, Short {farthest}')
+# Grafico
+cdi_monthly = selic.resample('M').apply(lambda x: (x + 1).prod() - 1)
+cdi_reindexed = cdi_monthly.reindex(btest.index, method='ffill')
+cdi_plot = cdi_reindexed.add(1).cumprod() - 1
+plot_performance(btest.final_return, btest.ibov, results_t, cdi_plot)
 
-# Plot PCA result with K-Means labels
-plt.figure(figsize=(12, 8))
-sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], hue=kmeans_labels, palette='tab10')
-# plt.scatter(kmeans.cluster_centers_[:, 0], kmeans.cluster_centers_[:, 1], s=300, c='red', label='Centroids', marker='X')
-plt.title('Clusters K-Means (PCA Reduced Data)')
-plt.xlabel('PCA Component 1')
-plt.ylabel('PCA Component 2')
-plt.legend(title='Cluster')
-plt.show()
 
-# Add labels
-plt.figure(figsize=(12, 8))
-sns.scatterplot(x=pca_result[:, 0], y=pca_result[:, 1], hue=kmeans_labels, palette='tab10')
-# plt.scatter(kmeans.cluster_centers_[:, 0], kmeans.cluster_centers_[:, 1], s=300, c='red', label='Centroids', marker='X')
-plt.title('Clusters K-Means (PCA Reduced Data)')
-plt.xlabel('PCA Component 1')
-plt.ylabel('PCA Component 2')
-plt.legend(title='Cluster')
 
-# Add labels for closest and farthest assets
-for label, cluster in closest_assets:
-    idx = residuals.columns.get_loc(label)
-    plt.annotate(label, (pca_result[idx, 0], pca_result[idx, 1]), fontsize=14, alpha=1, color='black', 
-                 xytext=(5,5), textcoords='offset points')
 
-for label, cluster in farthest_assets:
-    idx = residuals.columns.get_loc(label)
-    plt.annotate(label, (pca_result[idx, 0], pca_result[idx, 1]), fontsize=14, alpha=1, color='black', 
-                 xytext=(5,5), textcoords='offset points')
 
-plt.show()
-
-# Simple backtest
-def calculate_cumulative_return(prices):
-    returns = np.log(prices / prices.shift(1))
-    cumulative_return = np.exp(returns.cumsum()) - 1
-    return cumulative_return
-
-# PerIod
-start_test_period = test_period + timedelta(days=1)
-end_test_period = start_test_period + timedelta(days=90)
-
-selected_tickers = [str(ticker) for pair in operations for ticker in pair]
-df_all_data = df_all_data[df_all_data.Ticker.isin(selected_tickers)]
-df_all_data = df_all_data[(df_all_data.index>=start_test_period) & (df_all_data.index<=end_test_period)]
-
-df_bt = df_all_data[['Ticker', 'return', 'ibov_returns']]
-df_bt.reset_index(inplace=True)
-df_bt.set_index(['Date', 'Ticker'], inplace=True)
-
-# Cumulative returns
-stocks_cumulative_returns = df_bt.groupby('Ticker')['return'].cumsum()
-stocks_cumulative_returns = np.exp(stocks_cumulative_returns) - 1
-df_bt['cumulative_return'] = stocks_cumulative_returns
-
-# COlumn as stocks
-df_str_bt = df_bt.reset_index().pivot(index='Date', columns='Ticker', values='cumulative_return')
-
-# Ibov returns
-ibov_returns = df_bt.groupby('Date')['ibov_returns'].sum()
-ibov_cumulative_returns = np.exp(ibov_returns.cumsum()) - 1
-df_str_bt['ibov'] = ibov_cumulative_returns
-
-# Long-short: 1:1 leverage
-strategies_cumulative_returns = pd.DataFrame(index=df_str_bt.index)
-for long_stock, short_stock in operations:
-    strategies_cumulative_returns[f'Long {long_stock}, Short {short_stock}'] = df_str_bt[long_stock] - df_str_bt[short_stock]
-
-# Results
-plt.figure(figsize=(14, 8))
-for strategy in strategies_cumulative_returns.columns:
-    plt.plot(strategies_cumulative_returns[strategy], label=strategy, linestyle='--')
-
-plt.plot(ibov_cumulative_returns.index, ibov_cumulative_returns, label='IBOV', linewidth=2)
-plt.title('Long-Short vs IBOV')
-plt.xlabel('Date')
-plt.ylabel('Cumulative Return')
-plt.legend()
-plt.grid(True)
-plt.show()
 
 
