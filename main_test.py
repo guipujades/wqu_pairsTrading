@@ -4,21 +4,11 @@ import numpy as np
 import yfinance as yf
 import datetime as dt
 
+
 from data_handler import *
 from data_utils import *
 from strategies import * 
 from backtesting import *
-
-
-# 1A DB_counter_130_30_longbiased_15ativos_w90_eps0.3_min_6_liq_0.001_monthly_ibov
-# 2A DB_counter_130_30_longbiased_15ativos_w90_eps0.4_min_8_liq_0.01_monthly_cdi
-# 3A DB_counter_150_50_longbiased_15ativos_w90_eps0.4_min_8_liq_0.01_monthly_ibov
-# 4A DB_counter_150_50_longbiased_15ativos_w180_eps0.4_min_8_liq_0.01_monthly_ibov
-
-# COMMAND
-weekly = False
-liq_petr = 0.001
-long_biased_opt = True
 
 # Get data
 tmp_path = tempfile.mkdtemp()
@@ -58,6 +48,7 @@ df_all_data = df.copy()
 test_period = pd.to_datetime('2018-12-01')
 end_bt = '2019-01-31' # '2014-02-01'
 df = df[df.index <= test_period]
+df = df[df.index >= '2011-01-01']
 
 # Liquidity filter
 stock_reference = 'PETR4'
@@ -68,7 +59,7 @@ df['rolling_mean'] = df.groupby('Ticker')['Financial_Volume'].transform(lambda x
 df = pd.merge(df.reset_index(), liquidity_filter, on=['Date'], how='inner')
 
 # obs.: teste inicial com 0.05 e 3 ativos comprados e vendidos
-liquidity_mask = (df['rolling_mean'] < df['Vol_filter'] * liq_petr) # & (df['Close'] > 1.00) & (df['Close'] < 150)) # careful not to change df size 
+liquidity_mask = df['rolling_mean'] < df['Vol_filter'] * 0.01 # careful not to change df size 
 date_backup = df['Date'].copy()
 ticker_backup = df['Ticker'].copy()
 
@@ -76,24 +67,25 @@ df.loc[liquidity_mask, :] = np.nan
 df['Date'] = date_backup
 df['Ticker'] = ticker_backup
 
-if weekly:
-    period_port = 'weekly'
-else:
-    period_port = 'monthly'
-
 # benchmark strategy
-# long_dict, short_dict = bench_ll(df, frequency=period_port)
+# long_dict_benchll, short_dict_benchll = bench_ll(df, frequency='monthly')
+# long_dict, short_dict = bench_ll(df, frequency='monthly')
 
-# main strategy
-start_period = pd.to_datetime('2010-05-01')
-long_dict, short_dict = main_strategy_dbscan(df, start_period, lookback_period=30, turn_period=period_port) # 90
-# long_dict, short_dict = main_strategy_kmeans(df, start_period, lookback_period=50)
+# Main strategy
+start_period = pd.to_datetime('2012-01-01')
+long_dict, short_dict = main_strategy(df, start_period, lookback_period=720)
 
-# backtesting 
+# pkl.dump(long_dict, open(Path(Path.home(), 'Desktop', 'long_dict_wqumain_720d.pkl'), 'wb'))
+# pkl.dump(short_dict, open(Path(Path.home(), 'Desktop', 'short_dict_wqumain_720d.pkl'), 'wb'))
+# pkl.dump(long_dict, open(Path(Path.home(), 'Desktop', 'long_dict_wqumain_90d.pkl'), 'wb'))
+# pkl.dump(short_dict, open(Path(Path.home(), 'Desktop', 'short_dict_wqumain_90d.pkl'), 'wb'))
+# pkl.dump(long_dict, open(Path(Path.home(), 'Desktop', 'long_dict_wqumain.pkl'), 'wb'))
+# pkl.dump(short_dict, open(Path(Path.home(), 'Desktop', 'short_dict_wqumain.pkl'), 'wb'))
+# short_dict = pkl.load(open(Path(Path.home(), 'Desktop', 'long_dict_wqumain.pkl'),'rb'))
+# long_dict = pkl.load(open(Path(Path.home(), 'Desktop', 'short_dict_wqumain.pkl'),'rb'))
+
+# Backtesting 
 print('Running backtest...')
-print('Dados para gráfico:')
-input_data_plot = input()
-
 fee = 0.005 * 0.10
 equity = 100_000
 round_control = 0
@@ -115,6 +107,7 @@ selic = selic['Selic'] / 100
 
 for date, _ in long_dict.items():
     
+    
     print(f'Equity {equity} in {date}')
     
     date_ = find_last_day_of_month(date, ibov.index)
@@ -127,15 +120,12 @@ for date, _ in long_dict.items():
         cdi_date_out = date_
         cash = cash_flow_control.loc[round_control-1, 'cash']
         
-        # print(date)
-        # print(f'Cash: {cash}')
-        
         handle_cdi = selic.copy()
         handle_cdi = handle_cdi[(handle_cdi.index>=cdi_date_in) & (handle_cdi.index<=cdi_date_out)]
         cum_cdi = handle_cdi.add(1).cumprod()-1
         
         # PENDENTE -----------------------
-        cash_applied_cdi = cash + (cash * (cum_cdi.iloc[-1] * cdi_efficiency))
+        cash_applied_cdi = cash + 0 #(cash * (cum_cdi.iloc[-1] * cdi_efficiency))
         cash_flow_control.loc[round_control-1, 'cash'] = cash_applied_cdi
         
         if len(buy_control) == 0 or len(short_control) == 0:
@@ -155,17 +145,8 @@ for date, _ in long_dict.items():
     if len(buy_port) == 0:
         continue
     
-    buy_control, total_equity_usage_buy, cash_buy = make_positions(buy_port, prices_enfoque, equity, date_bt, fee, 
-                                                                   round_control, buy=True, atr_values=None, long_biased=long_biased_opt)
-    short_control, total_equity_usage_short, cash_short = make_positions(short_port, prices_enfoque, equity, date_bt, fee, 
-                                                                         round_control, buy=False, atr_values=None, long_biased=long_biased_opt)
-    
-    # if len(buy_control) > 0:
-    #     print('Posicao total comprada:')
-    #     print(np.sum(buy_control.fin))
-    # if len(short_control) > 0:
-    #     print('Posicao total vendida:')
-    #     print(np.sum(short_control.fin))
+    buy_control, total_equity_usage_buy, cash_buy = make_positions(buy_port, prices_enfoque, equity, date_bt, fee, round_control, buy=True, atr_values=None)
+    short_control, total_equity_usage_short, cash_short = make_positions(short_port, prices_enfoque, equity, date_bt, fee, round_control, buy=False, atr_values=None)
     
     pos_control = pd.concat([buy_control, short_control])
     cash_flow_control = handle_cash_flow(cash_flow, date_, equity, total_equity_usage_buy, total_equity_usage_short, cash_buy, cash_short, round_control)
@@ -184,34 +165,30 @@ for date, _ in long_dict.items():
         log_operations.append(handle_positions)
 
 
-if weekly:
-    bt_period_choice = 52
-else:
-    bt_period_choice = 12
-    
+bt_period_choice = 12
 operations_log = pd.concat(log_operations, axis=0)
-# operations_log.to_excel(Path(Path.home(), 'Desktop', 'lles1.xlsx'))
+# operations_log.to_excel(Path(Path.home(), 'Desktop', 'log_op_ll.xlsx'))
 # cash_flow.to_excel(Path(Path.home(), 'Desktop', 'cash_flow_ll.xlsx'))
 
-# Comissions
+# Taxas pagas
 total_comission = np.sum(operations_log.comission)
 print(f'Taxas pagas: {total_comission}')
 
-# Results
+# Resultados
 bt_result = cash_flow_control[['data', 'initial_equity']]
 bt_result.set_index('data', inplace=True)
 bt_result.index.name = 'Date'
 bt_result.index = pd.to_datetime(bt_result.index)
 bt_result = bt_result.iloc[:-1,:]
 
-# Merge str  ibov
+# Merge estrategia e ibov
 btest = pd.merge_asof(bt_result, ibov['Adj Close'], on='Date', direction='backward')
 btest = btest.rename(columns={'Adj Close': 'ibov', 'initial_equity':'final_return'})
 btest.set_index('Date', inplace=True)
 btest = btest.pct_change()
 btest.dropna(inplace=True)
 
-# Metrics
+# Metricas
 bt_result = metrics(btest, rf=0, period_param=bt_period_choice)
 results_t = pd.DataFrame.from_dict(bt_result, orient='index', columns=['Métricas'])
 print(results_t)
@@ -237,25 +214,22 @@ btest = add0(btest.reset_index())
 btest.loc[btest.index[0], 'Date'] = btest.loc[btest.index[1], 'Date'] - dt.timedelta(days=1)
 btest.set_index('Date', inplace=True)
 
-# Plot
-if weekly:
-    cdi_monthly = selic.resample('W-FRI').apply(lambda x: (x + 1).prod() - 1)
-else:
-    cdi_monthly = selic.resample('M').apply(lambda x: (x + 1).prod() - 1)
+# Grafico
+cdi_monthly = selic.resample('M').apply(lambda x: (x + 1).prod() - 1)
 cdi_reindexed = cdi_monthly.reindex(btest.index, method='ffill')
 cdi_plot = cdi_reindexed.add(1).cumprod() - 1
-plot_performance(btest.final_return, btest.ibov, results_t, cdi_plot, input_data_plot)
+plot_performance(btest.final_return, btest.ibov, results_t, cdi_plot)
 
 
 # metrics 
-# start = datetime.strftime(btest.index[0], format='%Y-%m-%d')
-# end = datetime.strftime(btest.index[-1], format='%Y-%m-%d')
-# key = 'final_return'
-# portfolio = None
-# name_strategy = 'auroraSt1_tests_1924_s'
-# get_report(
-#             btest.final_return, btest.ibov, start, end, key, 0, portfolio, 
-#             output_name=name_strategy)
+start = datetime.strftime(btest.index[0], format='%Y-%m-%d')
+end = datetime.strftime(btest.index[-1], format='%Y-%m-%d')
+key = 'final_return'
+portfolio = None
+name_strategy = 'tests'
+get_report(
+            btest.final_return, btest.ibov, start, end, key, 0, portfolio, 
+            output_name=name_strategy)
 
 
 

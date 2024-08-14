@@ -18,11 +18,11 @@ def metrics(df, rf=0, period_param=252) -> dict:
     # retorno total
     total_return = returns.add(1).cumprod()
     t_return = total_return - 1
-    results['Retorno'] = round(t_return.iloc[-1],3)
+    results['Return'] = round(t_return.iloc[-1],3)
     
     # volatilidade
     vol = returns.std() * np.sqrt(period_param)
-    results['Volatilidade'] = round(vol,3)
+    results['Volatility'] = round(vol,3)
 
     # max_drawdown
     t_return_max = total_return.cummax()
@@ -54,35 +54,46 @@ def metrics(df, rf=0, period_param=252) -> dict:
     # loss control
     loss_days = [i for i in returns if i<0]
     loss = len(loss_days) / len(returns)
-    results['Dias_perda'] = round(loss,3)
+    results['Loss_days'] = round(loss,3)
 
     return results
 
 
-def plot_performance(returns, ibov, metrics_plot, cdi):
+def plot_performance(returns, ibov, metrics_plot, cdi, input_data_plot):
     # Calcula o retorno acumulado para a estratégia, Ibovespa e CDI
     cum_return = returns.add(1).cumprod() - 1
     bench_cum_return = ibov.add(1).cumprod() - 1
+    
+    cdi = cdi * 0.8
     cdi_cum_return = cdi.add(1).cumprod() - 1
     cdi_cum_return = cdi.copy()
 
+    metrics_title = input_data_plot
     metrics_text = str(metrics_plot)
     
     # Plota os retornos acumulados
     plt.figure(figsize=(15, 8))
-    plt.plot(cum_return.index, cum_return, label='Long & Short Lead-Lag', color='darkblue')
+    plt.plot(cum_return.index, cum_return, label='Long & Short', color='darkblue')
     plt.plot(bench_cum_return.index, bench_cum_return, label='Ibovespa', color='gray', linestyle='--')
-    # plt.plot(cdi_cum_return.index, cdi_cum_return, label='CDI', color='gray', linestyle='-.')
+    plt.plot(cdi_cum_return.index, cdi_cum_return, label='CDI', color='gray', linestyle='-.')
     
-    # plt.text(0.7, 0.2, metrics_text, fontsize=12, transform=plt.gcf().transFigure)
+    plt.annotate(metrics_title, xy=(0.3, 0.6), xycoords='figure fraction', fontsize=12, 
+                 bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="lightgray"))
+    plt.annotate(metrics_text, xy=(0.7, 0.3), xycoords='figure fraction', fontsize=12, 
+                 bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="lightgray"))
     
     # Configurações do gráfico
     plt.title('Performance')
     plt.xlabel('Date')
     plt.ylabel('Return')
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.tight_layout()
-    plt.legend()
+    
+    # Ajuste do layout
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Espaço para o título
+    
+    # Posiciona a legenda fora do gráfico para evitar sobreposição
+    plt.legend(loc='upper left', bbox_to_anchor=(0.05, 1))
+    
     plt.show()
 
 
@@ -102,7 +113,54 @@ def handle_cash_flow(cash_flow, date, equity, total_equity_usage_buy, total_equi
     return cash_flow
 
 
-def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control, buy=True, adjust_equity= 0.3, atr_values=None):
+def handling_positions(pos_control, cash_flow_control, prices_enfoque, date, fee, round_control, cum_cdi):
+    
+    
+    cash_flow_control = cash_flow_control[cash_flow_control.index == round_control - 1]
+    assets = list(pos_control.assets)
+    
+    if date in prices_enfoque.Date:
+        sec_df = prices_enfoque[prices_enfoque.Date==date]
+        prices = sec_df[sec_df.Ticker.isin(assets)][['Ticker', 'Open']]
+        pos_control = pd.merge(pos_control, prices, left_on='assets', right_on='Ticker')
+        
+    else:
+        prior_dates = (prices_enfoque[pd.to_datetime(prices_enfoque.Date) < date]).Date
+        if not prior_dates.empty:
+            # Encontrar a data mais próxima anterior
+            nearest_date = prior_dates.max()
+            sec_df = prices_enfoque[prices_enfoque.Date==nearest_date]
+            prices = sec_df[sec_df.Ticker.isin(assets)][['Ticker', 'Open']]
+            pos_control = pd.merge(pos_control, prices, left_on='assets', right_on='Ticker')
+
+    pos_control['price_to_sell'] = np.where(pos_control['price'] > 0, pos_control['Open'], pos_control['Open']*-1)
+    pos_control['fin_sell'] = pos_control['price_to_sell']  * pos_control['volume']
+    pos_control['profit'] = pos_control['fin_sell'] - pos_control['fin_volume']
+    
+    # Taxas BTC
+    short_comission_fees = abs(np.where(pos_control['fin_volume'] > 0, pos_control['fin_volume'] * fee, pos_control['fin_volume'] * 0.005))
+    short_btc = np.where(pos_control['profit'] / pos_control['fin'] < 0, abs(pos_control['fin_volume'] * cum_cdi.iloc[-1]), abs(pos_control['profit'] / pos_control['fin']/10))
+    
+    pos_control['comission_out'] = short_comission_fees + short_btc
+    
+    
+    pos_control['date_out'] = date
+    
+    # Redução do caixa em funcao das vendas desfeitas dos shorts
+    equity_shorts = abs(np.sum(pos_control['fin_sell'][pos_control['fin_sell'] < 0]))
+    new_cash_after_handling_shorts = list(cash_flow_control.cash)[0] - equity_shorts
+    # Entrada em funcao das vendas das posicoes compradas
+    equity_buy = abs(np.sum(pos_control['fin_sell'][pos_control['fin_sell'] > 0]))
+    new_total_cash = equity_buy + new_cash_after_handling_shorts
+
+    new_total_equity = new_total_cash - np.sum(pos_control['comission_out'])
+    
+    return pos_control, new_total_equity
+
+
+
+def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control, buy=True, adjust_equity= 0.5, atr_values=None,
+                    long_biased=False):
     
     if atr_values is not None:
         
@@ -128,8 +186,8 @@ def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control,
     
     # use_equity['weights'] = 1 / len(use_equity)
     
-    adjusted_equity = equity * adjust_equity # ajustar equity para evitar carteira alavancada
-    use_equity['fin'] = use_equity['weights'] * adjusted_equity
+    # adjusted_equity = equity * adjust_equity # ajustar equity para evitar carteira alavancada
+    # use_equity['fin'] = use_equity['weights'] * adjusted_equity
     # assets = use_equity.assets
 
     av_dates = list(prices_enfoque.Date.unique())
@@ -139,6 +197,15 @@ def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control,
     
     if buy:
         
+        if long_biased:
+            adjusted_equity = equity
+            use_equity['fin'] = use_equity['weights'] * adjusted_equity
+            
+        else:
+            adjusted_equity = equity * adjust_equity # ajustar equity para evitar carteira alavancada
+            use_equity['fin'] = use_equity['weights'] * adjusted_equity
+        
+        
         if date in prices_enfoque.Date.unique():
             sec_df = prices_enfoque[prices_enfoque.Date==date]
             prices = sec_df[sec_df.Ticker.isin(list(use_equity.assets))][['Ticker', 'Open']]
@@ -147,33 +214,36 @@ def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control,
         else:
             prior_dates = ((prices_enfoque[pd.to_datetime(prices_enfoque.Date) < date]).Date).unique()
             if len(prior_dates) > 0:
-               # Encontrar a data mais próxima anterior
-               nearest_date = prior_dates.max()
+                # Encontrar a data mais próxima anterior
+                nearest_date = prior_dates.max()
                
-               find_next_date = av_dates.index(nearest_date) + 1
-               nearest_date = av_dates[find_next_date]
+                find_next_date = av_dates.index(nearest_date) + 1
+                nearest_date = av_dates[find_next_date]
                
-               sec_df = prices_enfoque[prices_enfoque.Date==nearest_date]
-               prices = sec_df[sec_df.Ticker.isin(list(use_equity.assets))][['Ticker', 'Open']]
+                sec_df = prices_enfoque[prices_enfoque.Date==nearest_date]
+                prices = sec_df[sec_df.Ticker.isin(list(use_equity.assets))][['Ticker', 'Open']]
                
-               counter = 0
-               while len(prices) == 0 and counter < 3:
-                   try:
-                       find_next_date = av_dates.index(nearest_date) + 1
-                       nearest_date = av_dates[find_next_date]
-                       sec_df = prices_enfoque[prices_enfoque.Date==nearest_date]
-                       prices = sec_df[sec_df.Ticker.isin(list(use_equity.assets))][['Ticker', 'Open']]
+                counter = 0
+                while len(prices) == 0 and counter < 3:
+                    try:
+                        find_next_date = av_dates.index(nearest_date) + 1
+                        nearest_date = av_dates[find_next_date]
+                        sec_df = prices_enfoque[prices_enfoque.Date==nearest_date]
+                        prices = sec_df[sec_df.Ticker.isin(list(use_equity.assets))][['Ticker', 'Open']]
                        
-                   except IndexError:  
-                       break
-                   counter += 1 
+                    except IndexError:  
+                        break
+                    counter += 1 
                        
-               if len(prices) == 0:  
-                   raise Exception(f'Não foi possível encontrar preço para {list(use_equity.assets)}')
+                if len(prices) == 0:  
+                    raise Exception(f'Não foi possível encontrar preço para {list(use_equity.assets)}')
                 
-               use_equity = pd.merge(use_equity, prices, left_on='assets', right_on='Ticker')
+                use_equity = pd.merge(use_equity, prices, left_on='assets', right_on='Ticker')
         
     else:
+        
+        adjusted_equity = equity * adjust_equity
+        use_equity['fin'] = use_equity['weights'] * adjusted_equity
         
         if date in prices_enfoque.Date.unique():
             sec_df = prices_enfoque[prices_enfoque.Date==date]
@@ -239,51 +309,3 @@ def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control,
         cash = abs(equity_usage + total_comission)
 
     return use_equity, total_equity_usage, cash
-
-
-def handling_positions(pos_control, cash_flow_control, prices_enfoque, date, fee, round_control, cum_cdi):
-    
-    
-    cash_flow_control = cash_flow_control[cash_flow_control.index == round_control - 1]
-    assets = list(pos_control.assets)
-    
-    if date in prices_enfoque.Date:
-        sec_df = prices_enfoque[prices_enfoque.Date==date]
-        prices = sec_df[sec_df.Ticker.isin(assets)][['Ticker', 'Open']]
-        pos_control = pd.merge(pos_control, prices, left_on='assets', right_on='Ticker')
-        
-    else:
-        prior_dates = (prices_enfoque[pd.to_datetime(prices_enfoque.Date) < date]).Date
-        if not prior_dates.empty:
-           # Encontrar a data mais próxima anterior
-           nearest_date = prior_dates.max()
-           sec_df = prices_enfoque[prices_enfoque.Date==nearest_date]
-           prices = sec_df[sec_df.Ticker.isin(assets)][['Ticker', 'Open']]
-           pos_control = pd.merge(pos_control, prices, left_on='assets', right_on='Ticker')
-
-    pos_control['price_to_sell'] = np.where(pos_control['price'] > 0, pos_control['Open'], pos_control['Open']*-1)
-    pos_control['fin_sell'] = pos_control['price_to_sell']  * pos_control['volume']
-    pos_control['profit'] = pos_control['fin_sell'] - pos_control['fin_volume']
-    
-    # Taxas BTC
-    short_comission_fees = abs(np.where(pos_control['fin_volume'] > 0, pos_control['fin_volume'] * fee, pos_control['fin_volume'] * 0.005))
-    short_btc = np.where(pos_control['profit'] / pos_control['fin'] < 0, abs(pos_control['fin_volume'] * cum_cdi.iloc[-1]), abs(pos_control['profit'] / pos_control['fin']/10))
-    
-    pos_control['comission_out'] = short_comission_fees + short_btc
-    
-    
-    pos_control['date_out'] = date
-    
-    # Redução do caixa em funcao das vendas desfeitas dos shorts
-    equity_shorts = abs(np.sum(pos_control['fin_sell'][pos_control['fin_sell'] < 0]))
-    new_cash_after_handling_shorts = list(cash_flow_control.cash)[0] - equity_shorts
-    # Entrada em funcao das vendas das posicoes compradas
-    equity_buy = abs(np.sum(pos_control['fin_sell'][pos_control['fin_sell'] > 0]))
-    new_total_cash = equity_buy + new_cash_after_handling_shorts
-
-    new_total_equity = new_total_cash - np.sum(pos_control['comission_out'])
-    
-    return pos_control, new_total_equity
-
-
-
