@@ -37,3 +37,14 @@ def complete_b3_fiis():
         'RBRX11', 'RPRI11', 'RMAI11', 'RINV11', 'RBHG11', 'RBHY11', 'RBVO11', 'RBFF11', 'RBOP11', 'RBRS11']
     
     return tickers_list_with_11
+
+
+
+# def save_tickers_to_txt():
+#     tickers = complete_b3_fiis()
+#     with open('tickers_list.txt', 'w') as f:
+#         for ticker in tickers:
+#             f.write(ticker + '\n')
+
+# # Chama a função para salvar a lista em um arquivo .txt
+# save_tickers_to_txt()

@@ -15,6 +15,18 @@ from sklearn.cluster import DBSCAN
 
 
 def bench_ll(df, frequency='monthly'):
+    """
+    Benchmarks a lead-lag strategy by calculating long and short positions 
+    based on sector returns.
+
+    Parameters:
+    - df (pd.DataFrame): DataFrame containing stock data with columns 'Ticker', 'Open', and 'sector'.
+    - frequency (str): The frequency of rebalancing ('monthly' or 'weekly').
+
+    Returns:
+    - long_dict (dict): Dictionary of dates as keys and list of long tickers as values.
+    - short_dict (dict): Dictionary of dates as keys and list of short tickers as values.
+    """
     
     # Get returns and prepare for signal
     df['return'] = df.groupby('Ticker')['Open'].pct_change()
@@ -87,6 +99,19 @@ def bench_ll(df, frequency='monthly'):
 
 
 def main_strategy_kmeans(df, start_period, lookback_period=365):
+    """
+    Implements a K-Means clustering strategy to identify long and short 
+    positions based on residuals from a linear model.
+
+    Parameters:
+    - df (pd.DataFrame): DataFrame containing stock data with columns 'Ticker', 'return', and 'ibov_returns'.
+    - start_period (datetime): The starting period for backtesting.
+    - lookback_period (int): The number of days to look back when calculating residuals.
+
+    Returns:
+    - long_dict (dict): Dictionary of dates as keys and list of long tickers as values.
+    - short_dict (dict): Dictionary of dates as keys and list of short tickers as values.
+    """
     
     df.set_index('Date', inplace=True)
     
@@ -160,8 +185,8 @@ def main_strategy_kmeans(df, start_period, lookback_period=365):
             if len(cluster_indices) > 1:
                 
                 sorted_indices = np.argsort(distances_to_centroids[cluster_indices, cluster])
-                n_long = min(15, len(sorted_indices))  
-                n_short = min(15, len(sorted_indices)) 
+                n_long = min(7, len(sorted_indices))  
+                n_short = min(8, len(sorted_indices)) 
                 
                 for i in range(n_long):
                     long_positions.append(residuals.columns[sorted_indices[i]])
@@ -207,6 +232,22 @@ def main_strategy_kmeans(df, start_period, lookback_period=365):
 
 
 def main_strategy_dbscan(df, start_period, lookback_period=365, db_eps=0.3, db_min_samples=6, turn_period='monthly'):
+    """
+    Implements a DBSCAN clustering strategy to identify long and short positions 
+    based on residuals from a linear model.
+
+    Parameters:
+    - df (pd.DataFrame): DataFrame containing stock data with columns 'Ticker', 'return', and 'ibov_returns'.
+    - start_period (datetime): The starting period for backtesting.
+    - lookback_period (int): The number of days to look back when calculating residuals.
+    - db_eps (float): The maximum distance between two samples for one to be considered as in the neighborhood of the other.
+    - db_min_samples (int): The number of samples (or total weight) in a neighborhood for a point to be considered as a core point.
+    - turn_period (str): The rebalancing period ('monthly' or 'weekly').
+
+    Returns:
+    - long_dict (dict): Dictionary of dates as keys and list of long tickers as values.
+    - short_dict (dict): Dictionary of dates as keys and list of short tickers as values.
+    """
     
     df.set_index('Date', inplace=True)
 
@@ -273,7 +314,7 @@ def main_strategy_dbscan(df, start_period, lookback_period=365, db_eps=0.3, db_m
             # Get assets
             sorted_indices = cluster_indices[np.argsort(distances_to_center)]
             
-            n_long = min(8, len(sorted_indices))  
+            n_long = min(7, len(sorted_indices))  
             n_short = min(7, len(sorted_indices))  
             
             for i in range(n_long):
@@ -310,4 +351,145 @@ def main_strategy_dbscan(df, start_period, lookback_period=365, db_eps=0.3, db_m
         else:
             print('error...')
 
+    return long_dict, short_dict
+
+
+def main_strategy_dbscan_sectorized(df, start_period, lookback_period=365, db_eps=0.5, db_min_samples=5, turn_period='monthly'):
+    """
+    Implements a sectorized DBSCAN clustering strategy to identify long and short 
+    positions based on residuals from a linear model, segmented by sector.
+
+    Parameters:
+    - df (pd.DataFrame): DataFrame containing stock data with columns 'Ticker', 'return', 'ibov_returns', and 'sector'.
+    - start_period (datetime): The starting period for backtesting.
+    - lookback_period (int): The number of days to look back when calculating residuals.
+    - db_eps (float): The maximum distance between two samples for one to be considered as in the neighborhood of the other.
+    - db_min_samples (int): The number of samples (or total weight) in a neighborhood for a point to be considered as a core point.
+    - turn_period (str): The rebalancing period ('monthly' or 'weekly').
+
+    Returns:
+    - long_dict (dict): Dictionary of dates as keys and list of long tickers as values.
+    - short_dict (dict): Dictionary of dates as keys and list of short tickers as values.
+    """
+    
+    df.set_index('Date', inplace=True)
+
+    end_period = df.index.max() 
+    long_dict = {}
+    short_dict = {}
+    current_period = start_period
+    
+    # Calculate total number of periods
+    total_periods = pd.date_range(start_period, end_period, freq='MS' if turn_period == 'monthly' else 'W').shape[0]
+    
+    # Identify the periods for plotting (beginning, middle, end)
+    plot_periods =  [] # [] #  [0, total_periods // 2, total_periods - 1]
+    period_counter = 0
+    
+    while current_period <= end_period:
+        print(f"Running strategy for {current_period.date()}")
+        
+        # Lookback period
+        lookback_start = current_period - timedelta(days=lookback_period)
+        
+        # Filter data for the lookback period
+        df_lookback = df[(df.index >= lookback_start) & (df.index <= current_period)]
+        
+        # Iterate through each sector
+        for sector, df_sector in df_lookback.groupby('sector'):
+            print(f"Processing sector: {sector}")
+            
+            assets = df_sector['Ticker'].unique()
+            residuals_list = []
+            for ticker in tqdm(assets):
+                df_ticker = df_sector[df_sector['Ticker'] == ticker]
+                df_ticker = df_ticker[['return', 'ibov_returns']].dropna() 
+                if len(df_ticker) == 0:
+                    continue
+                
+                # Calculate residuals
+                X = sm.add_constant(df_ticker['ibov_returns'])
+                y = df_ticker['return']
+                model = sm.OLS(y, X).fit()
+                resid = model.resid
+                residuals_list.append(pd.DataFrame({ticker: resid}))
+            
+            if residuals_list:
+                residuals = pd.concat(residuals_list, axis=1)
+            
+            # Deal with NaNs
+            min_non_na = int(0.9 * len(residuals))
+            residuals.dropna(thresh=min_non_na, axis=1, inplace=True)
+            residuals = residuals.ffill().bfill()
+            
+            n_components = min(2, residuals.shape[1], residuals.shape[0])
+            
+            if n_components > 0:
+                
+                # PCA
+                pca = PCA(n_components=n_components)
+                pca_result = pca.fit_transform(residuals.T)
+                
+                # DBSCAN
+                dbscan = DBSCAN(eps=db_eps, min_samples=db_min_samples)
+                cluster_labels = dbscan.fit_predict(pca_result)
+                
+                # Identify positions
+                long_positions = []
+                short_positions = []
+                
+                unique_clusters = np.unique(cluster_labels)
+                unique_clusters = unique_clusters[unique_clusters != -1]  # Exclude noise
+                
+                for cluster in unique_clusters:
+                    cluster_indices = np.where(cluster_labels == cluster)[0]
+                    
+                    cluster_center = pca_result[cluster_indices].mean(axis=0)
+                    distances_to_center = np.linalg.norm(pca_result[cluster_indices] - cluster_center, axis=1)
+                    
+                    # Sort by distance to cluster center
+                    sorted_indices = cluster_indices[np.argsort(distances_to_center)]
+                    
+                    n_long = min(1, len(sorted_indices))  
+                    n_short = min(1, len(sorted_indices))  
+                    
+                    for i in range(n_long):
+                        long_positions.append(residuals.columns[sorted_indices[i]])
+                    for i in range(n_short):
+                        short_positions.append(residuals.columns[sorted_indices[-(i+1)]])
+                
+                if long_positions or short_positions:
+                    if current_period not in long_dict:
+                        long_dict[current_period] = []
+                    if current_period not in short_dict:
+                        short_dict[current_period] = []
+                        
+                    long_dict[current_period].extend(long_positions)
+                    short_dict[current_period].extend(short_positions)
+                    
+                    # Plotting at beginning, middle, and end only
+                    if period_counter in plot_periods:
+                        plt.figure(figsize=(10, 6))
+                        plt.scatter(pca_result[:, 0], pca_result[:, 1], c=cluster_labels, cmap='viridis', marker='o', alpha=0.7)
+                        plt.title(f"DBSCAN Clustering - Sector: {sector} - {current_period.date()}")
+                        plt.xlabel('PCA Component 1')
+                        plt.ylabel('PCA Component 2')
+                        plt.colorbar(label='Cluster Label')
+                        
+                        # Annotating the selected positions
+                        for i, ticker in enumerate(residuals.columns):
+                            if ticker in long_positions:
+                                plt.annotate(ticker, (pca_result[i, 0], pca_result[i, 1]), color='blue', fontsize=8, fontweight='bold')
+                            elif ticker in short_positions:
+                                plt.annotate(ticker, (pca_result[i, 0], pca_result[i, 1]), color='red', fontsize=8, fontweight='bold')
+                        
+                        plt.show()
+            
+        if turn_period == 'monthly':
+            current_period += pd.offsets.MonthBegin(1)
+        elif turn_period == 'weekly':
+            current_period += pd.offsets.Week(1)
+        else:
+            print('error...')
+    
     return long_dict, short_dict

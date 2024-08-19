@@ -10,21 +10,22 @@ from strategies import *
 from backtesting import *
 
 
-# 1A DB_counter_130_30_longbiased_15ativos_w90_eps0.3_min_6_liq_0.001_monthly_ibov
-# 2A DB_counter_130_30_longbiased_15ativos_w90_eps0.4_min_8_liq_0.01_monthly_cdi
-# 3A DB_counter_150_50_longbiased_15ativos_w90_eps0.4_min_8_liq_0.01_monthly_ibov
-# 4A DB_counter_150_50_longbiased_15ativos_w180_eps0.4_min_8_liq_0.01_monthly_ibov
 
 # COMMAND
 weekly = False
 liq_petr = 0.001
-long_biased_opt = True
+long_biased_opt = False
+start_period = pd.to_datetime('2011-01-01')
+test_period = pd.to_datetime('2018-12-01')
+end_bt = '2019-01-31'
+use_stop = False
 
 # Get data
 tmp_path = tempfile.mkdtemp()
 t = Tickers_B3(tmp_path)
 t.open_file()
 assets, prices_enfoque, sectors_b3 = t.get_tickers()
+sectors_b3['sector'].unique()
 
 # Get benchmark data
 start_date = prices_enfoque.Date.unique()[0]
@@ -49,15 +50,15 @@ df.set_index('Date', inplace=True)
 df = df[df.index.isin(ibov.index)]
 
 # Merge returns
-df['return'] = df.groupby('Ticker')['Open'].transform(lambda x: np.log(x).diff())
-ibov['ibov_returns'] = np.log(ibov['Adj Close']/ibov['Adj Close'].shift(1))
+# df['return'] = df.groupby('Ticker')['Open'].transform(lambda x: np.log(x).diff())
+# ibov['ibov_returns'] = np.log(ibov['Adj Close']/ibov['Adj Close'].shift(1))
+df['return'] = df.groupby('Ticker')['Open'].transform(lambda x: x.pct_change())
+ibov['ibov_returns'] = ibov['Adj Close'].pct_change()
 df = pd.merge(df, ibov['ibov_returns'], on='Date')
 
 # Test period (only one run): pre-backtesting
 df_all_data = df.copy()
-test_period = pd.to_datetime('2018-12-01')
-end_bt = '2019-01-31' # '2014-02-01'
-df = df[df.index <= test_period]
+df = df[(df.index >= start_period) & (df.index <= test_period)]
 
 # Liquidity filter
 stock_reference = 'PETR4'
@@ -82,12 +83,13 @@ else:
     period_port = 'monthly'
 
 # benchmark strategy
-# long_dict, short_dict = bench_ll(df, frequency=period_port)
+long_dict, short_dict = bench_ll(df, frequency=period_port)
 
 # main strategy
-start_period = pd.to_datetime('2010-05-01')
-long_dict, short_dict = main_strategy_dbscan(df, start_period, lookback_period=30, turn_period=period_port) # 90
-# long_dict, short_dict = main_strategy_kmeans(df, start_period, lookback_period=50)
+# long_dict, short_dict = main_strategy_dbscan(df, start_period, lookback_period=30, db_eps=0.8, db_min_samples=4, turn_period=period_port) # 90
+# long_dict, short_dict = main_strategy_kmeans(df, start_period, lookback_period=30)
+# long_dict, short_dict = main_strategy_dbscan_sectorized(df, start_period, lookback_period=30, 
+#                                                         db_eps=0.8, db_min_samples=4, turn_period='monthly')
 
 # backtesting 
 print('Running backtest...')
@@ -142,7 +144,8 @@ for date, _ in long_dict.items():
             print('Error: prob empty df...')
             break
         
-        handle_positions, equity = handling_positions(pos_control, cash_flow_control, prices_enfoque, date_, fee, round_control, cum_cdi)
+        handle_positions, equity = handling_positions(pos_control, cash_flow_control, prices_enfoque, 
+                                                      date_, fee, round_control, cum_cdi, stop=use_stop)
         bt_control = pd.concat([bt_control, handle_positions], axis=0)
         log_operations.append(handle_positions)
     
@@ -175,7 +178,8 @@ for date, _ in long_dict.items():
     
     # Desmontar operacoes finais
     if date == list(long_dict.keys())[-1]:
-        handle_positions, equity = handling_positions(pos_control, cash_flow_control, prices_enfoque, date_, fee, round_control, cum_cdi)
+        handle_positions, equity = handling_positions(pos_control, cash_flow_control, prices_enfoque, 
+                                                      date_, fee, round_control, cum_cdi, stop=use_stop)
         
         cash_flow_control.loc[round_control, 'initial_equity'] = equity
         cash_flow_control.loc[round_control, 'data'] = end_bt
@@ -190,7 +194,7 @@ else:
     bt_period_choice = 12
     
 operations_log = pd.concat(log_operations, axis=0)
-# operations_log.to_excel(Path(Path.home(), 'Desktop', 'lles1.xlsx'))
+# operations_log.to_excel(Path(Path.home(), 'Desktop', 'db3.xlsx'))
 # cash_flow.to_excel(Path(Path.home(), 'Desktop', 'cash_flow_ll.xlsx'))
 
 # Comissions

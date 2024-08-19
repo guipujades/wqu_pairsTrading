@@ -5,6 +5,17 @@ import matplotlib.pyplot as plt
 
 # Backtest
 def find_last_day_of_month(period, date_index):
+    """
+    Finds the last trading day of the month for a given period.
+
+    Parameters:
+    - period (datetime): The period (year and month) for which to find the last trading day.
+    - date_index (pd.DatetimeIndex): The index of dates to search within.
+
+    Returns:
+    - datetime or None: The last trading day of the month, or None if no dates are found.
+    """
+    
     month_dates = date_index[(date_index.year == period.year) & (date_index.month == period.month)]
     if len(month_dates) > 0:
         return month_dates[-1]
@@ -12,6 +23,19 @@ def find_last_day_of_month(period, date_index):
         return None
 
 def metrics(df, rf=0, period_param=252) -> dict:
+    """
+    Calculates various performance metrics for a trading strategy.
+
+    Parameters:
+    - df (pd.DataFrame): DataFrame containing the strategy's returns and benchmark data.
+    - rf (float): The risk-free rate used in Sharpe and Sortino ratio calculations. Default is 0.
+    - period_param (int): The number of periods per year (e.g., 252 for daily data, 52 for weekly data).
+
+    Returns:
+    - dict: A dictionary containing the calculated performance metrics, including 
+      Return, Volatility, Drawdown, CAGR, Sharpe, Sortino, Beta, and Loss_days.
+    """
+    
     results = {}
     returns = df.final_return
 
@@ -60,6 +84,17 @@ def metrics(df, rf=0, period_param=252) -> dict:
 
 
 def plot_performance(returns, ibov, metrics_plot, cdi, input_data_plot):
+    """
+    Plots the cumulative performance of the trading strategy against the Ibovespa and CDI benchmarks.
+
+    Parameters:
+    - returns (pd.Series): Series of strategy returns.
+    - ibov (pd.Series): Series of Ibovespa returns.
+    - metrics_plot (pd.DataFrame): DataFrame containing the performance metrics to be displayed.
+    - cdi (pd.Series): Series of CDI (Brazilian risk-free rate) returns.
+    - input_data_plot (str): Title or label for the plot.
+    """
+    
     # Calcula o retorno acumulado para a estratégia, Ibovespa e CDI
     cum_return = returns.add(1).cumprod() - 1
     bench_cum_return = ibov.add(1).cumprod() - 1
@@ -77,10 +112,10 @@ def plot_performance(returns, ibov, metrics_plot, cdi, input_data_plot):
     plt.plot(bench_cum_return.index, bench_cum_return, label='Ibovespa', color='gray', linestyle='--')
     plt.plot(cdi_cum_return.index, cdi_cum_return, label='CDI', color='gray', linestyle='-.')
     
-    plt.annotate(metrics_title, xy=(0.3, 0.6), xycoords='figure fraction', fontsize=12, 
-                 bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="lightgray"))
-    plt.annotate(metrics_text, xy=(0.7, 0.3), xycoords='figure fraction', fontsize=12, 
-                 bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="lightgray"))
+    # plt.annotate(metrics_title, xy=(0.3, 0.6), xycoords='figure fraction', fontsize=12, 
+    #              bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="lightgray"))
+    # plt.annotate(metrics_text, xy=(0.7, 0.3), xycoords='figure fraction', fontsize=12, 
+    #              bbox=dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="lightgray"))
     
     # Configurações do gráfico
     plt.title('Performance')
@@ -98,6 +133,22 @@ def plot_performance(returns, ibov, metrics_plot, cdi, input_data_plot):
 
 
 def handle_cash_flow(cash_flow, date, equity, total_equity_usage_buy, total_equity_usage_short, cash_buy, cash_short, round_control):
+    """
+    Updates the cash flow DataFrame with information about the current round of trading.
+
+    Parameters:
+    - cash_flow (pd.DataFrame): DataFrame to track the cash flow during the backtest.
+    - date (datetime): The current date for the round.
+    - equity (float): The total equity available for trading.
+    - total_equity_usage_buy (float): Total equity used for buying positions.
+    - total_equity_usage_short (float): Total equity used for short positions.
+    - cash_buy (float): Cash available after buying positions.
+    - cash_short (float): Cash available after shorting positions.
+    - round_control (int): The current round of trading.
+
+    Returns:
+    - pd.DataFrame: Updated cash flow DataFrame.
+    """
     
     total_equity_usage = total_equity_usage_buy + total_equity_usage_short
     cash = cash_buy + cash_short
@@ -113,8 +164,24 @@ def handle_cash_flow(cash_flow, date, equity, total_equity_usage_buy, total_equi
     return cash_flow
 
 
-def handling_positions(pos_control, cash_flow_control, prices_enfoque, date, fee, round_control, cum_cdi):
-    
+def handling_positions(pos_control, cash_flow_control, prices_enfoque, date, fee, round_control, cum_cdi, stop=False):
+    """
+    Handles the execution of positions, applying stop-loss, and updating cash flow.
+
+    Parameters:
+    - pos_control (pd.DataFrame): DataFrame containing position data.
+    - cash_flow_control (pd.DataFrame): DataFrame to track cash flow control.
+    - prices_enfoque (pd.DataFrame): DataFrame containing stock prices.
+    - date (datetime): The current date for position handling.
+    - fee (float): The transaction fee applied to trades.
+    - round_control (int): The current round of trading.
+    - cum_cdi (pd.Series): Series representing the cumulative CDI for adjusting short positions.
+    - stop (bool): Whether to apply a stop-loss on positions. Default is False.
+
+    Returns:
+    - pd.DataFrame: Updated positions DataFrame.
+    - float: Updated total equity after handling positions.
+    """
     
     cash_flow_control = cash_flow_control[cash_flow_control.index == round_control - 1]
     assets = list(pos_control.assets)
@@ -134,6 +201,35 @@ def handling_positions(pos_control, cash_flow_control, prices_enfoque, date, fee
             pos_control = pd.merge(pos_control, prices, left_on='assets', right_on='Ticker')
 
     pos_control['price_to_sell'] = np.where(pos_control['price'] > 0, pos_control['Open'], pos_control['Open']*-1)
+    
+    # Vamos implementar nesse ponto um stop de 12% (10% com margem para as posicoes)
+    # Esse formato tem uma falha grande, porque nao acompanha o preco durante todo o periodo, mas serve como proxy por hora
+    # O price_to_sell passa a ter um teto de uma diff de 12% para o preco
+    pos_control['price_to_sell'] = np.where(pos_control['price'] > 0, pos_control['Open'], pos_control['Open']*-1)
+    
+    if stop:
+        prices_control = list(pos_control['price'])
+        prices_stop_control = list(pos_control['price_to_sell'])
+        new_prices_to_sell_list = []
+        
+        for n, i in enumerate(prices_control):
+            # Verifica se o preço caiu mais de 12%
+            if (prices_stop_control[n] / i - 1) < -0.05:
+                # Aplica o stop de 12%
+                price_stop = i * 0.95
+                # print('Alerta de stop')
+                # print(f'Preco original: {i}')
+                # print(f'Preco final: {prices_stop_control[n]}')
+                # print(f'Preco calculado para stop: {price_stop}')
+                # print('Verifique a presenca do preco no proximo df...')
+                new_prices_to_sell_list.append(price_stop)
+            else:
+                new_prices_to_sell_list.append(prices_stop_control[n])
+        
+        # Atualiza o preço de venda com o stop aplicado
+        pos_control['price_to_sell'] = new_prices_to_sell_list
+        # print(pos_control.price_to_sell)
+    
     pos_control['fin_sell'] = pos_control['price_to_sell']  * pos_control['volume']
     pos_control['profit'] = pos_control['fin_sell'] - pos_control['fin_volume']
     
@@ -159,8 +255,28 @@ def handling_positions(pos_control, cash_flow_control, prices_enfoque, date, fee
 
 
 
-def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control, buy=True, adjust_equity= 0.5, atr_values=None,
+def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control, buy=True, adjust_equity= 0.3, atr_values=None,
                     long_biased=False):
+    """
+    Creates and manages trading positions based on available equity and other parameters.
+
+    Parameters:
+    - use_equity (pd.DataFrame): DataFrame containing assets to be used for positions.
+    - prices_enfoque (pd.DataFrame): DataFrame containing stock prices.
+    - equity (float): The total equity available for trading.
+    - date (datetime): The current date for creating positions.
+    - fee (float): The transaction fee applied to trades.
+    - round_control (int): The current round of trading.
+    - buy (bool): Whether to create buy positions (True) or short positions (False). Default is True.
+    - adjust_equity (float): The proportion of equity to be used for creating positions. Default is 0.3.
+    - atr_values (pd.DataFrame): DataFrame containing ATR (Average True Range) values for adjusting positions. Default is None.
+    - long_biased (bool): Whether to favor long positions. Default is False.
+
+    Returns:
+    - pd.DataFrame: DataFrame of the created positions.
+    - float: Total equity usage for the created positions.
+    - float: Cash remaining after creating the positions.
+    """
     
     if atr_values is not None:
         
@@ -284,7 +400,6 @@ def make_positions(use_equity, prices_enfoque, equity, date, fee, round_control,
     
     use_equity.drop(columns=['Ticker'], inplace=True)
     use_equity = use_equity.rename(columns={'Open': 'price'})
-    
     
     use_equity['volume'] = abs((use_equity['fin'] / use_equity['price']).astype(int))
     use_equity['volume'] = round(use_equity['volume'] / 100) * 100
